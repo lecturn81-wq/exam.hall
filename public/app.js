@@ -5,6 +5,7 @@ const e = s => String(s ?? "").replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&
 const fmt = t => new Date(t).toLocaleTimeString();
 const TN = { mc: "Multiple Choice", tf: "True / False", drag: "Drag to Order", wr: "Written Answer" };
 let un = [];
+let aiOn = null;
 const clean = () => { un.forEach(f => { try { f() } catch (_) {} }); un = []; app.onclick = app.oninput = app.onchange = null; };
 const poll = (fn, ms) => { fn(); const id = setInterval(fn, ms); un.push(() => clearInterval(id)); };
 function toast(m) { const t = $("toast"); t.textContent = m; t.style.display = "block"; clearTimeout(toast.h); toast.h = setTimeout(() => t.style.display = "none", 4000); }
@@ -15,6 +16,18 @@ async function api(m, u, b) {
   return j;
 }
 const err = x => toast(x && x.message || "Something went wrong");
+/* browser backup: a copy of tests + results is kept in this browser and can be restored to the server */
+const LS = { get: k => { try { return localStorage.getItem(k) } catch (_) { return null } }, set: (k, v) => { try { localStorage.setItem(k, v) } catch (_) {} }, del: k => { try { localStorage.removeItem(k) } catch (_) {} } };
+let lastBk = 0;
+const localBk = () => { try { return JSON.parse(LS.get("eh_bk")) } catch (_) { return null } };
+async function backup(afterDelete) {
+  if (!afterDelete && Date.now() - lastBk < 15000) return; lastBk = Date.now();
+  try { const d = await api("GET", "/api/backup"); if (Object.keys(d.tests).length) LS.set("eh_bk", JSON.stringify({ t: Date.now(), d })); else if (afterDelete) LS.del("eh_bk"); } catch (_) {}
+}
+async function restoreData(d) { const r = await api("POST", "/api/restore", d); toast(`Restored ${r.tests} test(s) and ${r.subs} submission(s).`); dash(); }
+async function dlBackup() { const d = await api("GET", "/api/backup"); download(`examhall-backup-${new Date().toISOString().slice(0, 10)}.json`, JSON.stringify(d), "application/json"); }
+function banner() { const b = localBk(), n = b && b.d && Object.keys(b.d.tests || {}).length; return n ? `<div class=card style="border-color:var(--w)"><b>⚠ The server has no tests, but this browser has a saved backup</b><p class=m>${n} test(s) and ${(b.d.subs || []).length} submission(s), saved ${new Date(b.t).toLocaleString()}.</p><button data-a=rest>Restore from this browser</button></div>` : ""; }
+const tools = () => `<div class=card><b>Backup &amp; restore</b><p class=m>Tests and results are copied into this browser automatically while this dashboard is open. Download a file copy for extra safety.</p><div class=row><button class=g data-a=dl>Download backup file</button><label class=m>Restore from file: <input type=file id=rf accept=".json,application/json" style="width:auto"></label></div></div>`;
 function ask(m) {
   return new Promise(r => {
     const o = document.createElement("div"); o.className = "ov";
@@ -60,19 +73,23 @@ function dash() {
   clean();
   app.innerHTML = `<div class="row sp"><h1>Teacher dashboard</h1><div class=row><button id=nt>+ New test</button><button class=g id=lo>Sign out</button></div></div><div id=tl2><p class=m>Loading…</p></div>`;
   $("nt").onclick = () => editor(null); $("lo").onclick = logout;
+  app.onchange = async ev => { if (ev.target.id !== "rf" || !ev.target.files[0]) return; try { await restoreData(JSON.parse(await ev.target.files[0].text())); } catch (x) { err(x && x.code ? x : { message: "That file isn't a valid ExamHall backup." }); } };
   let L = [];
   poll(async () => {
     try { L = await api("GET", "/api/tests"); } catch (x) { if (x.code === 401) return home(); return; }
-    $("tl2").innerHTML = L.length ? L.map(t => `<div class=card><div class="row sp"><div><h3>${e(t.title)}</h3><span class=m>${t.qs.length} questions · ${total(t)} marks · ${t.students} student(s)</span></div>
+    backup();
+    $("tl2").innerHTML = (L.length ? L.map(t => `<div class=card><div class="row sp"><div><h3>${e(t.title)}</h3><span class=m>${t.qs.length} questions · ${total(t)} marks · ${t.students} student(s)</span></div>
 <div class=row><span class=code>${t.code}</span><span class="tag ${t.open ? "ok" : "bad"}">${t.open ? "OPEN" : "CLOSED"}</span></div></div>
-<div class=row style="margin-top:10px"><button data-a=mon data-id=${t.code}>Monitor &amp; mark</button><button class="${t.open ? "r" : "k"}" data-a=tog data-id=${t.code}>${t.open ? "Close test" : "Open test"}</button><button class=g data-a=ed data-id=${t.code}>Edit</button><button class=g data-a=del data-id=${t.code}>Delete</button></div></div>`).join("") : `<div class=card><p class=m>No tests yet. Create your first one.</p></div>`;
+<div class=row style="margin-top:10px"><button data-a=mon data-id=${t.code}>Monitor &amp; mark</button><button class="${t.open ? "r" : "k"}" data-a=tog data-id=${t.code}>${t.open ? "Close test" : "Open test"}</button><button class=g data-a=ed data-id=${t.code}>Edit</button><button class=g data-a=del data-id=${t.code}>Delete</button></div></div>`).join("") : banner() + `<div class=card><p class=m>No tests yet. Create your first one.</p></div>`) + tools();
   }, 5000);
   $("tl2").onclick = async ev => {
     const b = ev.target.closest("button[data-a]"); if (!b) return; const t = L.find(x => x.code === b.dataset.id), a = b.dataset.a;
     try {
+      if (a === "rest") return await restoreData(localBk().d);
+      if (a === "dl") return await dlBackup();
       if (a === "tog") { if (t.open && !await ask("Close the test? Students still working will be submitted automatically.")) return; await api("POST", `/api/tests/${t.code}/toggle`); dash(); }
       else if (a === "ed") editor(t); else if (a === "mon") monitor(t.code);
-      else if (a === "del" && await ask("Delete this test and all its submissions?")) { await api("DELETE", "/api/tests/" + t.code); dash(); }
+      else if (a === "del" && await ask("Delete this test and all its submissions?")) { await api("DELETE", "/api/tests/" + t.code); await backup(true); dash(); }
     } catch (x) { err(x) }
   };
 }
@@ -80,7 +97,13 @@ function dash() {
 /* ---------- TEACHER: editor ---------- */
 function editor(t) {
   clean();
-  const D = t ? { title: t.title, qs: t.qs.map(q => ({ t: q.t, q: q.q, pts: q.pts, o: (q.opts || []).join("\n"), a: q.t === "mc" ? q.ans + 1 : q.t === "tf" ? String(q.ans) : "", i: (q.items || []).join("\n") })) } : { title: "", qs: [] };
+  const D = t ? { title: t.title, qs: t.qs.map(q => ({ t: q.t, q: q.q, pts: q.pts, o: (q.opts || []).join("\n"), a: q.t === "mc" ? q.ans + 1 : q.t === "tf" ? String(q.ans) : "", i: (q.items || []).join("\n") })) } 
+: { title: "", qs: [] };
+  const G = { topic: "", level: "", mc: 3, tf: 2, drag: 1, wr: 1 };
+  const aiCard = () => aiOn ? `<div class=card><b>✨ Generate with AI</b><p class=m>Describe the test and the AI writes the questions and picks the answers. Always check them before saving.</p>
+<input data-g=topic placeholder="Topic (e.g. Causes of World War 1)" maxlength=500 value="${e(G.topic)}"><input data-g=level placeholder="Level (e.g. Grade 9)" maxlength=100 value="${e(G.level)}">
+<div class=row>${["mc", "tf", "drag", "wr"].map(k => `<div style="flex:1;min-width:110px"><label class=m>${TN[k]}</label><input type=number min=0 max=15 data-g=${k} value="${G[k]}"></div>`).join("")}</div>
+<button id=gen>Generate questions</button></div>` : aiOn === false ? `<div class=card><span class=m>✨ AI question generation is off. Add a GEMINI_API_KEY in your server's environment settings to turn it on.</span></div>` : "";
   const draw = () => {
     app.innerHTML = `<div class="row sp"><h1>${t ? "Edit" : "New"} test</h1><button class=g id=bk>Cancel</button></div>
 <div class=card><label class=m>Test title</label><input id=ti value="${e(D.title)}" maxlength=100></div>
@@ -90,11 +113,11 @@ ${q.t === "mc" ? `<label class=m>Options (one per line)</label><textarea rows=4 
 ${q.t === "tf" ? `<label class=m>Correct answer</label><select data-q=${i} data-f=a><option value=true ${q.a === "true" ? "selected" : ""}>True</option><option value=false ${q.a === "false" ? "selected" : ""}>False</option></select>` : ""}
 ${q.t === "drag" ? `<label class=m>Items in the CORRECT order (one per line; shuffled for each student)</label><textarea rows=4 data-q=${i} data-f=i>${e(q.i)}</textarea>` : ""}
 <label class=m>Marks</label><input type=number min=0 step=0.5 data-q=${i} data-f=pts value="${q.pts}"></div>`).join("")}
-<div class=card><div class=m>Add question</div><div class=row style="margin-top:8px">${Object.keys(TN).map(k => `<button class=g data-add=${k}>+ ${TN[k]}</button>`).join("")}</div></div>
+${aiCard()}<div class=card><div class=m>Add question</div><div class=row style="margin-top:8px">${Object.keys(TN).map(k => `<button class=g data-add=${k}>+ ${TN[k]}</button>`).join("")}</div></div>
 <button id=sv style="width:100%;padding:13px">Save test</button>`;
     $("bk").onclick = dash; $("ti").oninput = () => D.title = $("ti").value;
-    app.onclick = ev => { const b = ev.target.closest("button"); if (!b) return; if (b.dataset.add) { D.qs.push({ t: b.dataset.add, q: "", pts: 1, o: "", a: b.dataset.add === "tf" ? "true" : "", i: "" }); draw(); } else if (b.dataset.x !== undefined) { D.qs.splice(+b.dataset.x, 1); draw(); } };
-    app.oninput = app.onchange = ev => { const d = ev.target.dataset; if (d.q !== undefined) D.qs[d.q][d.f] = d.f === "pts" ? Number(ev.target.value) : ev.target.value; };
+    app.onclick = ev => { const b = ev.target.closest("button"); if (!b) return; if (b.dataset.add) { D.qs.push({ t: b.dataset.add, q: "", pts: 1, o: "", a: b.dataset.add === "tf" ? "true" : "", i: "" }); draw(); } else if (b.dataset.x !== undefined) { D.qs.splice(+b.dataset.x, 1); draw(); } else if (b.id === "gen") gen(); };
+    app.oninput = app.onchange = ev => { const d = ev.target.dataset; if (d.g) G[d.g] = ev.target.value; if (d.q !== undefined) D.qs[d.q][d.f] = d.f === "pts" ? Number(ev.target.value) : ev.target.value; };
     $("sv").onclick = save;
   };
   async function save() {
@@ -103,7 +126,19 @@ ${q.t === "drag" ? `<label class=m>Items in the CORRECT order (one per line; shu
     const qs = D.qs.map(q => { const o = { t: q.t, q: q.q.trim(), pts: q.pts }; if (q.t === "mc") { o.opts = L(q.o); o.ans = Number(q.a) - 1; } if (q.t === "tf") o.ans = q.a === "true"; if (q.t === "drag") o.items = L(q.i); return o; });
     try { if (t) await api("PUT", "/api/tests/" + t.code, { title: D.title.trim(), qs }); else await api("POST", "/api/tests", { title: D.title.trim(), qs }); toast("Test saved."); dash(); } catch (x) { err(x) }
   }
+  async function gen() {
+    if (!G.topic.trim()) return toast("Enter a topic first.");
+    const btn = $("gen"); btn.disabled = true; btn.textContent = "Generating… (up to a minute)";
+    try {
+      const r = await api("POST", "/api/generate", { topic: G.topic, level: G.level, counts: { mc: +G.mc, tf: +G.tf, drag: +G.drag, wr: +G.wr } });
+      r.qs.forEach(q => D.qs.push({ t: q.t, q: q.q, pts: q.pts, o: (q.opts || []).join("\n"), a: q.t === "mc" ? q.ans + 1 : q.t === "tf" ? String(q.ans) : "", i: (q.items || []).join("\n") }));
+      if (!D.title.trim()) D.title = G.topic.trim();
+      toast(`Added ${r.qs.length} questions. Check them before saving!`);
+    } catch (x) { err(x) }
+    draw();
+  }
   draw();
+  api("GET", "/api/me").then(r => { aiOn = !!r.ai; draw(); }).catch(() => {});
 }
 
 /* ---------- TEACHER: live monitor ---------- */
@@ -120,7 +155,7 @@ function monitor(code) {
       return `<tr class=cl data-s="${s.id}"><td><b>${e(s.name)}</b></td><td><span class="tag ${s.status === "done" ? "ok" : "w"}">${s.status === "done" ? (s.reviewed ? "MARKED" : "SUBMITTED") : "IN PROGRESS"}</span></td><td><div class=bar><i style="width:${p}%"></i></div><span class=m>${s.answered}/${test.qs.length}</span></td><td>${s.score} / ${s.total}</td><td>${s.flags ? `<span class="tag bad">⚠ ${s.flags}</span>` : `<span class=m>0</span>`}</td><td class=m>${s.updated ? fmt(s.updated) : "-"}</td></tr>`; }).join("")}</table></div><p class=m>Click a student to review and mark. Written answers count 0 until marked.</p>` : `<p class=m>Waiting for students. Share the code <b>${code}</b> and open the test.</p>`;
     $("mt").onclick = ev => { const r = ev.target.closest("tr[data-s]"); if (r) review(test, r.dataset.s, code); };
   };
-  const tick = async () => { try { data = await api("GET", "/api/tests/" + code); draw(); } catch (x) { if (x.code === 401) home(); } };
+  const tick = async () => { try { data = await api("GET", "/api/tests/" + code); draw(); backup(); } catch (x) { if (x.code === 401) home(); } };
   poll(tick, 3000);
 }
 

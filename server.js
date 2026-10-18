@@ -49,10 +49,10 @@ function send(res, code, body, extra = {}) {
   res.end(isObj ? JSON.stringify(body) : body);
 }
 const fail = (res, code, error) => send(res, code, { error });
-function readBody(req) {
+function readBody(req, max = 1e6) {
   return new Promise((ok, no) => {
     let s = "", n = 0;
-    req.on("data", c => { n += c.length; if (n > 1e6) { no("Too large"); req.destroy(); } else s += c; });
+    req.on("data", c => { n += c.length; if (n > max) { no("Too large"); req.destroy(); } else s += c; });
     req.on("end", () => { try { ok(s ? JSON.parse(s) : {}); } catch (_) { no("Bad JSON"); } });
   });
 }
@@ -104,11 +104,86 @@ function finish(s) { if (s.status !== "done") { s.status = "done"; s.submitted =
 const shuffle = n => { const a = Array.from({ length: n }, (_, i) => i); for (let i = n - 1; i > 0; i--) { const j = crypto.randomInt(i + 1); [a[i], a[j]] = [a[j], a[i]]; } return a; };
 const FLAGS = ["Left the test tab", "Window lost focus", "Exited full screen", "Reloaded or rejoined the page"];
 
+/* ---------- backup restore (teacher only; everything re-validated) ---------- */
+function restore(b) {
+  let nt = 0, ns = 0; b = b && typeof b === "object" ? b : {};
+  for (const t of (b.tests && typeof b.tests === "object" ? Object.values(b.tests) : [])) {
+    try {
+      if (!t || !/^[A-Z0-9]{6}$/.test(t.code) || db.tests[t.code]) continue;
+      const title = String(t.title || "").trim().slice(0, 100); if (!title) continue;
+      db.tests[t.code] = { code: t.code, title, qs: cleanQs(t.qs), open: t.open === true, created: Number(t.created) || Date.now() }; nt++;
+    } catch (_) {}
+  }
+  for (const s of (Array.isArray(b.subs) ? b.subs : [])) {
+    try {
+      const t = s && db.tests[s.code]; if (!t || !/^[a-f0-9]{16}$/.test(s.id) || db.subs[s.id]) continue;
+      const name = String(s.name || "").trim().slice(0, 60) || "Student";
+      if (subsOf(s.code).some(x => x.name.toLowerCase() === name.toLowerCase())) continue;
+      const shuf = {};
+      t.qs.forEach((q, i) => { if (q.t === "drag") { const p = s.shuf && s.shuf["q" + i]; shuf["q" + i] = Array.isArray(p) && p.length === q.items.length && [...p].sort((x, y) => x - y).every((x, k) => x === k) ? p : shuffle(q.items.length); } });
+      const marks = {}, fb = {};
+      t.qs.forEach((q, i) => {
+        const v = s.marks && s.marks["q" + i]; if (typeof v === "number" && isFinite(v)) marks["q" + i] = Math.max(0, Math.min(q.pts, v));
+        const f = s.fb && s.fb["q" + i]; if (typeof f === "string" && f.trim()) fb["q" + i] = f.trim().slice(0, 1000);
+      });
+      const done = s.status === "done";
+      db.subs[s.id] = { id: s.id, code: s.code, name, token: crypto.randomBytes(24).toString("hex"), answers: cleanAnswers(t, s.answers),
+        flags: (Array.isArray(s.flags) ? s.flags : []).filter(f => f && typeof f.k === "string" && Number.isFinite(f.t)).slice(0, 500).map(f => ({ k: f.k.slice(0, 80), t: f.t })),
+        status: done ? "done" : "in", started: Number(s.started) || Date.now(), updated: Number(s.updated) || Date.now(), submitted: done ? (Number(s.submitted) || Date.now()) : undefined,
+        marks, fb, reviewed: !!s.reviewed, shuf }; ns++;
+    } catch (_) {}
+  }
+  persist(); return { tests: nt, subs: ns };
+}
+
+/* ---------- AI question generator (Claude or Gemini; key stays on the server) ---------- */
+const provider = () => process.env.ANTHROPIC_API_KEY ? "claude" : process.env.GEMINI_API_KEY ? "gemini" : null;
+const aiHits = [];
+async function generate(b) {
+  const p = provider(); if (!p) throw { code: 503, msg: "AI isn't set up on this server yet. Add a GEMINI_API_KEY in your host's environment settings." };
+  const now = Date.now(); while (aiHits.length && now - aiHits[0] > 3600e3) aiHits.shift();
+  if (aiHits.length >= 20) throw { code: 429, msg: "AI limit reached (20 generations per hour). Try again later." };
+  const topic = String(b.topic || "").trim().slice(0, 500), level = String(b.level || "").trim().slice(0, 100) || "general";
+  if (!topic) throw { code: 400, msg: "Enter a topic." };
+  const c = {}; let n = 0;
+  for (const k of ["mc", "tf", "drag", "wr"]) { c[k] = Math.max(0, Math.min(15, Math.floor(Number(b.counts && b.counts[k]) || 0))); n += c[k]; }
+  if (!n || n > 30) throw { code: 400, msg: "Ask for between 1 and 30 questions in total." };
+  const prompt = `You write exam questions for teachers. Topic: "${topic}". Level: ${level}.
+Create exactly: ${c.mc} multiple choice (t:"mc"), ${c.tf} true/false (t:"tf"), ${c.drag} drag-to-order (t:"drag"), ${c.wr} written-answer (t:"wr") questions.
+Reply with ONLY JSON, no markdown: {"questions":[{"t":"mc","q":"...","pts":1,"opts":["A","B","C","D"],"ans":0},{"t":"tf","q":"...","pts":1,"ans":true},{"t":"drag","q":"Put these in order...","pts":3,"items":["first","second","third"]},{"t":"wr","q":"...","pts":4}]}
+Rules: mc has exactly 4 options and "ans" is the 0-based index of the single correct option; tf "ans" is true or false; drag has 3-6 items listed in the CORRECT order and the order must be objectively determinable (chronology, steps of a process, size...); wr has no answer field. Be factually accurate and unambiguous.`;
+  aiHits.push(now);
+  let text;
+  try {
+    if (p === "gemini") {
+      const r = await fetch(`${process.env.GEMINI_BASE || "https://generativelanguage.googleapis.com"}/v1beta/models/${process.env.GEMINI_MODEL || "gemini-flash-latest"}:generateContent`, {
+        method: "POST", headers: { "Content-Type": "application/json", "x-goog-api-key": process.env.GEMINI_API_KEY }, signal: AbortSignal.timeout(60000),
+        body: JSON.stringify({ contents: [{ parts: [{ text: prompt }] }], generationConfig: { responseMimeType: "application/json", temperature: 0.7 } }) });
+      if (r.status === 429) throw { code: 429, msg: "The AI's free limit was hit. Wait a minute and try again." };
+      if (!r.ok) throw { code: 502, msg: "The AI service returned an error (" + r.status + "). Check your API key." };
+      const j = await r.json(); text = ((j.candidates || [])[0]?.content?.parts || []).map(x => x.text || "").join("");
+    } else {
+      const r = await fetch(`${process.env.ANTHROPIC_BASE || "https://api.anthropic.com"}/v1/messages`, {
+        method: "POST", headers: { "Content-Type": "application/json", "x-api-key": process.env.ANTHROPIC_API_KEY, "anthropic-version": "2023-06-01" }, signal: AbortSignal.timeout(60000),
+        body: JSON.stringify({ model: process.env.CLAUDE_MODEL || "claude-haiku-5-5", max_tokens: 4000, messages: [{ role: "user", content: prompt }] }) });
+      if (r.status === 429) throw { code: 429, msg: "AI rate limit hit. Wait a minute and try again." };
+      if (!r.ok) throw { code: 502, msg: "The AI service returned an error (" + r.status + "). Check your API key." };
+      const j = await r.json(); text = (j.content || []).map(x => x.text || "").join("");
+    }
+  } catch (e) { if (e && e.code) throw e; throw { code: 502, msg: "Couldn't reach the AI service. Try again." }; }
+  let arr; try { arr = JSON.parse(text.replace(/^```(?:json)?\s*|\s*```$/g, "").trim()).questions; } catch (_) { throw { code: 502, msg: "The AI gave an unreadable answer. Try again." }; }
+  const out = [];
+  for (const q of (Array.isArray(arr) ? arr : []).slice(0, 40)) { try { out.push(cleanQs([{ ...q, pts: Number(q.pts) >= 0 ? q.pts : 1 }])[0]); } catch (_) {} }
+  if (!out.length) throw { code: 502, msg: "The AI's questions were invalid. Try again." };
+  return out;
+}
+
 /* ---------- routes ---------- */
 async function api(req, res, url) {
   const m = req.method, p = url.pathname;
   if (m !== "GET" && !/^application\/json/.test(req.headers["content-type"] || "")) return fail(res, 415, "JSON required");
-  const body = m === "GET" ? {} : await readBody(req).catch(e => { throw e; });
+  const big = p === "/api/restore"; if (big && !isTeacher(req)) return fail(res, 401, "Not signed in.");
+  const body = m === "GET" ? {} : await readBody(req, big ? 8e6 : 1e6).catch(e => { throw e; });
 
   if (p === "/api/login" && m === "POST") {
     const ip = ipOf(req), f = fails.get(ip) || { n: 0, until: 0 };
@@ -121,7 +196,7 @@ async function api(req, res, url) {
     return send(res, 200, { ok: true }, { h: { "Set-Cookie": `eh=${mkSession()}; HttpOnly; SameSite=Strict; Path=/; Max-Age=28800${secure}` } });
   }
   if (p === "/api/logout" && m === "POST") return send(res, 200, { ok: true }, { h: { "Set-Cookie": "eh=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0" } });
-  if (p === "/api/me") return send(res, 200, { teacher: isTeacher(req) });
+  if (p === "/api/me") { const te = isTeacher(req); return send(res, 200, { teacher: te, ai: te && !!provider() }); }
 
   /* ----- student ----- */
   if (p === "/api/join" && m === "POST") {
@@ -166,9 +241,15 @@ async function api(req, res, url) {
   }
 
   /* ----- teacher (cookie required) ----- */
-  if (!p.startsWith("/api/tests") && !p.startsWith("/api/subs")) return fail(res, 404, "Not found");
+  if (!/^\/api\/(tests|subs|generate|backup|restore)/.test(p)) return fail(res, 404, "Not found");
   if (!isTeacher(req)) return fail(res, 401, "Not signed in.");
   let r;
+  if (p === "/api/backup" && m === "GET") return send(res, 200, { v: 1, tests: db.tests, subs: Object.values(db.subs).map(({ token, ...x }) => x) });
+  if (p === "/api/restore" && m === "POST") return send(res, 200, restore(body));
+  if (p === "/api/generate" && m === "POST") {
+    try { return send(res, 200, { qs: await generate(body) }); }
+    catch (x) { return fail(res, x && x.code || 500, x && x.msg || "AI generation failed."); }
+  }
   if (p === "/api/tests" && m === "GET") return send(res, 200, Object.values(db.tests).sort((a, b) => b.created - a.created).map(t => ({ ...t, students: subsOf(t.code).length })));
   if (p === "/api/tests" && m === "POST") {
     const title = String(body.title || "").trim().slice(0, 100); if (!title) return fail(res, 400, "Add a title.");
