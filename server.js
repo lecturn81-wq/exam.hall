@@ -156,18 +156,29 @@ Rules: mc has exactly 4 options and "ans" is the 0-based index of the single cor
   let text;
   try {
     if (p === "gemini") {
-      const r = await fetch(`${process.env.GEMINI_BASE || "https://generativelanguage.googleapis.com"}/v1beta/models/${process.env.GEMINI_MODEL || "gemini-flash-latest"}:generateContent`, {
-        method: "POST", headers: { "Content-Type": "application/json", "x-goog-api-key": process.env.GEMINI_API_KEY }, signal: AbortSignal.timeout(60000),
-        body: JSON.stringify({ contents: [{ parts: [{ text: prompt }] }], generationConfig: { responseMimeType: "application/json", temperature: 0.7 } }) });
-      if (r.status === 429) throw { code: 429, msg: "The AI's free limit was hit. Wait a minute and try again." };
-      if (!r.ok) throw { code: 502, msg: "The AI service returned an error (" + r.status + "). Check your API key." };
-      const j = await r.json(); text = ((j.candidates || [])[0]?.content?.parts || []).map(x => x.text || "").join("");
+      const models = [...new Set([process.env.GEMINI_MODEL || "gemini-flash-latest", "gemini-flash-lite-latest"])];
+      let last = 0, detail = "";
+      outer: for (const model of models) {
+        for (let attempt = 0; attempt < 2; attempt++) {
+          const r = await fetch(`${process.env.GEMINI_BASE || "https://generativelanguage.googleapis.com"}/v1beta/models/${model}:generateContent`, {
+            method: "POST", headers: { "Content-Type": "application/json", "x-goog-api-key": process.env.GEMINI_API_KEY }, signal: AbortSignal.timeout(45000),
+            body: JSON.stringify({ contents: [{ parts: [{ text: prompt }] }], generationConfig: { responseMimeType: "application/json", temperature: 0.7 } }) });
+          if (r.ok) { const j = await r.json(); text = ((j.candidates || [])[0]?.content?.parts || []).map(x => x.text || "").join(""); break outer; }
+          last = r.status; try { detail = String((await r.json()).error?.message || "").slice(0, 200); } catch (_) {}
+          if ([400, 401, 403].includes(r.status)) throw { code: 502, msg: `Google rejected the request (${r.status}). Check that GEMINI_API_KEY is correct and saved.${detail ? " Google says: " + detail : ""}` };
+          if (r.status === 404) break;
+          await delay(1500);
+        }
+      }
+      if (text === undefined) throw { code: 502, msg: last === 429 ? "The AI's free limit was hit. Wait a minute and try again."
+        : last === 404 ? "That AI model name wasn't found. Remove GEMINI_MODEL or set it to a current model."
+        : "Google's AI is overloaded right now (error " + last + "). Wait a minute and try again." };
     } else {
       const r = await fetch(`${process.env.ANTHROPIC_BASE || "https://api.anthropic.com"}/v1/messages`, {
         method: "POST", headers: { "Content-Type": "application/json", "x-api-key": process.env.ANTHROPIC_API_KEY, "anthropic-version": "2023-06-01" }, signal: AbortSignal.timeout(60000),
         body: JSON.stringify({ model: process.env.CLAUDE_MODEL || "claude-haiku-5-5", max_tokens: 4000, messages: [{ role: "user", content: prompt }] }) });
       if (r.status === 429) throw { code: 429, msg: "AI rate limit hit. Wait a minute and try again." };
-      if (!r.ok) throw { code: 502, msg: "The AI service returned an error (" + r.status + "). Check your API key." };
+      if (!r.ok) throw { code: 502, msg: [401, 403].includes(r.status) ? "Anthropic rejected the key (" + r.status + "). Check ANTHROPIC_API_KEY." : "The AI service is busy or returned an error (" + r.status + "). Try again in a minute." };
       const j = await r.json(); text = (j.content || []).map(x => x.text || "").join("");
     }
   } catch (e) { if (e && e.code) throw e; throw { code: 502, msg: "Couldn't reach the AI service. Try again." }; }
