@@ -101,8 +101,8 @@ function editor(t) {
 : { title: "", qs: [] };
   const G = { topic: "", level: "", mc: 3, tf: 2, drag: 1, wr: 1 };
   const aiCard = () => aiOn ? `<div class=card><b>✨ Generate with AI</b><p class=m>Describe the test and the AI writes the questions and picks the answers. Always check them before saving.</p>
-<input data-g=topic placeholder="Topic (e.g. Causes of World War 1)" maxlength=500 value="${e(G.topic)}"><input data-g=level placeholder="Level (e.g. Grade 9)" maxlength=100 value="${e(G.level)}">
-<div class=row>${["mc", "tf", "drag", "wr"].map(k => `<div style="flex:1;min-width:110px"><label class=m>${TN[k]}</label><input type=number min=0 max=15 data-g=${k} value="${G[k]}"></div>`).join("")}</div>
+<label class=m>What should the AI write? Describe the topic, style, difficulty, what to include or avoid…</label><textarea data-g=topic rows=7 maxlength=4000 placeholder="e.g. Grade 9 history test on the causes of World War 1. Focus on alliances, militarism and the assassination of Franz Ferdinand. Make the multiple choice tricky but fair, and ask the written questions to be analytical.">${e(G.topic)}</textarea><input data-g=level placeholder="Level (e.g. Grade 9)" maxlength=100 value="${e(G.level)}">
+<div class=row>${["mc", "tf", "drag", "wr"].map(k => `<div style="flex:1;min-width:110px"><label class=m>${TN[k]}</label><input type=number min=0 max=50 data-g=${k} value="${G[k]}"></div>`).join("")}</div><p class=m>Up to 50 of each type and 60 questions total per click. Big requests can take 1–2 minutes.</p>
 <button id=gen>Generate questions</button></div>` : aiOn === false ? `<div class=card><span class=m>✨ AI question generation is off. Add a GEMINI_API_KEY in your server's environment settings to turn it on.</span></div>` : "";
   const draw = () => {
     app.innerHTML = `<div class="row sp"><h1>${t ? "Edit" : "New"} test</h1><button class=g id=bk>Cancel</button></div>
@@ -128,11 +128,11 @@ ${aiCard()}<div class=card><div class=m>Add question</div><div class=row style="
   }
   async function gen() {
     if (!G.topic.trim()) return toast("Enter a topic first.");
-    const btn = $("gen"); btn.disabled = true; btn.textContent = "Generating… (up to a minute)";
+    const btn = $("gen"); btn.disabled = true; btn.textContent = "Generating… (can take 1–2 minutes)";
     try {
       const r = await api("POST", "/api/generate", { topic: G.topic, level: G.level, counts: { mc: +G.mc, tf: +G.tf, drag: +G.drag, wr: +G.wr } });
       r.qs.forEach(q => D.qs.push({ t: q.t, q: q.q, pts: q.pts, o: (q.opts || []).join("\n"), a: q.t === "mc" ? q.ans + 1 : q.t === "tf" ? String(q.ans) : "", i: (q.items || []).join("\n") }));
-      if (!D.title.trim()) D.title = G.topic.trim();
+      if (!D.title.trim()) D.title = G.topic.trim().split("\n")[0].slice(0, 60);
       toast(`Added ${r.qs.length} questions. Check them before saving!`);
     } catch (x) { err(x) }
     draw();

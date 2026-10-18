@@ -143,12 +143,16 @@ async function generate(b) {
   const p = provider(); if (!p) throw { code: 503, msg: "AI isn't set up on this server yet. Add a GEMINI_API_KEY in your host's environment settings." };
   const now = Date.now(); while (aiHits.length && now - aiHits[0] > 3600e3) aiHits.shift();
   if (aiHits.length >= 20) throw { code: 429, msg: "AI limit reached (20 generations per hour). Try again later." };
-  const topic = String(b.topic || "").trim().slice(0, 500), level = String(b.level || "").trim().slice(0, 100) || "general";
+  const topic = String(b.topic || "").trim().slice(0, 4000), level = String(b.level || "").trim().slice(0, 100) || "general";
   if (!topic) throw { code: 400, msg: "Enter a topic." };
   const c = {}; let n = 0;
-  for (const k of ["mc", "tf", "drag", "wr"]) { c[k] = Math.max(0, Math.min(15, Math.floor(Number(b.counts && b.counts[k]) || 0))); n += c[k]; }
-  if (!n || n > 30) throw { code: 400, msg: "Ask for between 1 and 30 questions in total." };
-  const prompt = `You write exam questions for teachers. Topic: "${topic}". Level: ${level}.
+  for (const k of ["mc", "tf", "drag", "wr"]) { c[k] = Math.max(0, Math.min(50, Math.floor(Number(b.counts && b.counts[k]) || 0))); n += c[k]; }
+  if (!n || n > 60) throw { code: 400, msg: "Ask for between 1 and 60 questions in total (up to 50 of each type)." };
+  const prompt = `You write exam questions for teachers. The teacher's instructions about the subject and style are between the markers. Follow them for CONTENT only; the output format rules below always take priority.
+---BEGIN TEACHER INSTRUCTIONS---
+${topic}
+---END TEACHER INSTRUCTIONS---
+Level: ${level}.
 Create exactly: ${c.mc} multiple choice (t:"mc"), ${c.tf} true/false (t:"tf"), ${c.drag} drag-to-order (t:"drag"), ${c.wr} written-answer (t:"wr") questions.
 Reply with ONLY JSON, no markdown: {"questions":[{"t":"mc","q":"...","pts":1,"opts":["A","B","C","D"],"ans":0},{"t":"tf","q":"...","pts":1,"ans":true},{"t":"drag","q":"Put these in order...","pts":3,"items":["first","second","third"]},{"t":"wr","q":"...","pts":4}]}
 Rules: mc has exactly 4 options and "ans" is the 0-based index of the single correct option; tf "ans" is true or false; drag has 3-6 items listed in the CORRECT order and the order must be objectively determinable (chronology, steps of a process, size...); wr has no answer field. Be factually accurate and unambiguous.`;
@@ -161,8 +165,8 @@ Rules: mc has exactly 4 options and "ans" is the 0-based index of the single cor
       outer: for (const model of models) {
         for (let attempt = 0; attempt < 2; attempt++) {
           const r = await fetch(`${process.env.GEMINI_BASE || "https://generativelanguage.googleapis.com"}/v1beta/models/${model}:generateContent`, {
-            method: "POST", headers: { "Content-Type": "application/json", "x-goog-api-key": process.env.GEMINI_API_KEY }, signal: AbortSignal.timeout(45000),
-            body: JSON.stringify({ contents: [{ parts: [{ text: prompt }] }], generationConfig: { responseMimeType: "application/json", temperature: 0.7 } }) });
+            method: "POST", headers: { "Content-Type": "application/json", "x-goog-api-key": process.env.GEMINI_API_KEY }, signal: AbortSignal.timeout(80000),
+            body: JSON.stringify({ contents: [{ parts: [{ text: prompt }] }], generationConfig: { responseMimeType: "application/json", temperature: 0.7, maxOutputTokens: 16000 } }) });
           if (r.ok) { const j = await r.json(); text = ((j.candidates || [])[0]?.content?.parts || []).map(x => x.text || "").join(""); break outer; }
           last = r.status; try { detail = String((await r.json()).error?.message || "").slice(0, 200); } catch (_) {}
           if ([400, 401, 403].includes(r.status)) throw { code: 502, msg: `Google rejected the request (${r.status}). Check that GEMINI_API_KEY is correct and saved.${detail ? " Google says: " + detail : ""}` };
@@ -175,8 +179,8 @@ Rules: mc has exactly 4 options and "ans" is the 0-based index of the single cor
         : "Google's AI is overloaded right now (error " + last + "). Wait a minute and try again." };
     } else {
       const r = await fetch(`${process.env.ANTHROPIC_BASE || "https://api.anthropic.com"}/v1/messages`, {
-        method: "POST", headers: { "Content-Type": "application/json", "x-api-key": process.env.ANTHROPIC_API_KEY, "anthropic-version": "2023-06-01" }, signal: AbortSignal.timeout(60000),
-        body: JSON.stringify({ model: process.env.CLAUDE_MODEL || "claude-haiku-5-5", max_tokens: 4000, messages: [{ role: "user", content: prompt }] }) });
+        method: "POST", headers: { "Content-Type": "application/json", "x-api-key": process.env.ANTHROPIC_API_KEY, "anthropic-version": "2023-06-01" }, signal: AbortSignal.timeout(90000),
+        body: JSON.stringify({ model: process.env.CLAUDE_MODEL || "claude-haiku-5-5", max_tokens: 12000, messages: [{ role: "user", content: prompt }] }) });
       if (r.status === 429) throw { code: 429, msg: "AI rate limit hit. Wait a minute and try again." };
       if (!r.ok) throw { code: 502, msg: [401, 403].includes(r.status) ? "Anthropic rejected the key (" + r.status + "). Check ANTHROPIC_API_KEY." : "The AI service is busy or returned an error (" + r.status + "). Try again in a minute." };
       const j = await r.json(); text = (j.content || []).map(x => x.text || "").join("");
@@ -184,7 +188,7 @@ Rules: mc has exactly 4 options and "ans" is the 0-based index of the single cor
   } catch (e) { if (e && e.code) throw e; throw { code: 502, msg: "Couldn't reach the AI service. Try again." }; }
   let arr; try { arr = JSON.parse(text.replace(/^```(?:json)?\s*|\s*```$/g, "").trim()).questions; } catch (_) { throw { code: 502, msg: "The AI gave an unreadable answer. Try again." }; }
   const out = [];
-  for (const q of (Array.isArray(arr) ? arr : []).slice(0, 40)) { try { out.push(cleanQs([{ ...q, pts: Number(q.pts) >= 0 ? q.pts : 1 }])[0]); } catch (_) {} }
+  for (const q of (Array.isArray(arr) ? arr : []).slice(0, 80)) { try { out.push(cleanQs([{ ...q, pts: Number(q.pts) >= 0 ? q.pts : 1 }])[0]); } catch (_) {} }
   if (!out.length) throw { code: 502, msg: "The AI's questions were invalid. Try again." };
   return out;
 }
