@@ -3,7 +3,7 @@ const app = document.getElementById("app");
 const $ = id => document.getElementById(id);
 const e = s => String(s ?? "").replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 const fmt = t => new Date(t).toLocaleTimeString();
-const TN = { mc: "Multiple Choice", tf: "True / False", drag: "Drag to Order", wr: "Written Answer" };
+const TN = { mc: "Multiple Choice", tf: "True / False", drag: "Drag to Order", wr: "Written Answer", title: "Title", bank: "Question Bank" };
 let un = [];
 let aiOn = null;
 const clean = () => { un.forEach(f => { try { f() } catch (_) {} }); un = []; app.onclick = app.oninput = app.onchange = null; };
@@ -40,7 +40,7 @@ function download(name, text, type) { const a = document.createElement("a"); a.h
 
 /* scoring helpers (display only; server is authoritative for tables) */
 function auto(q, a) {
-  if (q.t === "wr") return null; if (a === undefined || a === null) return 0;
+  if (q.t === "wr" || q.t === "title") return null; if(q.t === "bank") return Array.isArray(a) && a.length===q.rows.length && a.every((v,i)=>v===q.ans[i]) ? q.pts : 0; if (a === undefined || a === null) return 0;
   if (q.t === "drag") return Array.isArray(a) && a.length === q.items.length && a.every((v, k) => v === k) ? q.pts : 0;
   return a === q.ans ? q.pts : 0;
 }
@@ -50,9 +50,9 @@ const score = (t, s) => t.qs.reduce((a, _, i) => a + mark(t, s, i), 0);
 function aText(q, a) {
   if (a === undefined || a === null || a === "") return "(no answer)";
   if (q.t === "mc") return q.opts[a] ?? "(no answer)"; if (q.t === "tf") return a ? "True" : "False";
-  if (q.t === "drag") return Array.isArray(a) ? a.map(k => q.items[k]).join(" → ") : "(no answer)"; return a;
+  if (q.t === "drag") return Array.isArray(a) ? a.map(k => q.items[k]).join(" → ") : "(no answer)"; if(q.t === "bank") return Array.isArray(a) ? a.map((v,i)=>`${q.rows[i]}: ${q.opts[v]||"(no answer)"}`).join("; ") : "(no answer)"; return a;
 }
-const cText = q => q.t === "mc" ? q.opts[q.ans] : q.t === "tf" ? (q.ans ? "True" : "False") : q.t === "drag" ? q.items.join(" → ") : "Marked manually";
+const cText = q => q.t === "mc" ? q.opts[q.ans] : q.t === "tf" ? (q.ans ? "True" : "False") : q.t === "drag" ? q.items.join(" → ") : q.t === "bank" ? q.rows.map((r,i)=>`${r}: ${q.opts[q.ans[i]]}`).join("; ") : q.t === "title" ? "Section heading" : "Marked manually";
 
 /* ---------- HOME ---------- */
 function home() {
@@ -97,21 +97,22 @@ function dash() {
 /* ---------- TEACHER: editor ---------- */
 function editor(t) {
   clean();
-  const D = t ? { title: t.title, qs: t.qs.map(q => ({ t: q.t, q: q.q, pts: q.pts, o: (q.opts || []).join("\n"), a: q.t === "mc" ? q.ans + 1 : q.t === "tf" ? String(q.ans) : "", i: (q.items || []).join("\n") })) } 
+  const D = t ? { title: t.title, limitMinutes:t.limitMinutes||0, openAt:t.openAt?new Date(t.openAt).toISOString().slice(0,16):"", closeAt:t.closeAt?new Date(t.closeAt).toISOString().slice(0,16):"", qs: t.qs.map(q => ({ t: q.t, q: q.q, pts: q.pts, o: (q.opts || []).join("\n"), a: q.t === "mc" ? q.ans + 1 : q.t === "tf" ? String(q.ans) : "", i: (q.items || []).join("\n"), optsBank:(q.t === "bank" ? q.opts.join("\n") : ""), rowsBank:(q.t === "bank" ? q.rows.join("\n") : ""), ansBank:(q.t === "bank" ? q.ans.map(x=>x+1).join("\n") : "") })) } 
 : { title: "", qs: [] };
-  const G = { topic: "", level: "", mc: 3, tf: 2, drag: 1, wr: 1 };
+  const G = { topic: "", level: "", mc: 3, tf: 2, drag: 1, wr: 1, title: 0, bank: 0 };
   const aiCard = () => aiOn ? `<div class=card><b>✨ Generate with AI</b><p class=m>Describe the test and the AI writes the questions and picks the answers. Always check them before saving.</p>
 <label class=m>What should the AI write? Describe the topic, style, difficulty, what to include or avoid…</label><textarea data-g=topic rows=7 maxlength=4000 placeholder="e.g. Grade 9 history test on the causes of World War 1. Focus on alliances, militarism and the assassination of Franz Ferdinand. Make the multiple choice tricky but fair, and ask the written questions to be analytical.">${e(G.topic)}</textarea><input data-g=level placeholder="Level (e.g. Grade 9)" maxlength=100 value="${e(G.level)}">
-<div class=row>${["mc", "tf", "drag", "wr"].map(k => `<div style="flex:1;min-width:110px"><label class=m>${TN[k]}</label><input type=number min=0 max=50 data-g=${k} value="${G[k]}"></div>`).join("")}</div><p class=m>Up to 50 of each type and 60 questions total per click. Big requests can take 1–2 minutes.</p>
+<div class=row>${["mc", "tf", "drag", "wr", "title", "bank"].map(k => `<div style="flex:1;min-width:110px"><label class=m>${TN[k]}</label><input type=number min=0 max=50 data-g=${k} value="${G[k]}"></div>`).join("")}</div><p class=m>Up to 50 of each type and 60 questions total per click. Big requests can take 1–2 minutes.</p>
 <button id=gen>Generate questions</button></div>` : aiOn === false ? `<div class=card><span class=m>✨ AI question generation is off. Add a GEMINI_API_KEY in your server's environment settings to turn it on.</span></div>` : "";
   const draw = () => {
     app.innerHTML = `<div class="row sp"><h1>${t ? "Edit" : "New"} test</h1><button class=g id=bk>Cancel</button></div>
-<div class=card><label class=m>Test title</label><input id=ti value="${e(D.title)}" maxlength=100></div>
+<div class=card><label class=m>Test title</label><input id=ti value="${e(D.title)}" maxlength=100><div class=row><div style="flex:1;min-width:130px"><label class=m>Time limit (minutes, 0 = none)</label><input id=lim type=number min=0 max=600 value="${D.limitMinutes||0}"></div><div style="flex:1;min-width:180px"><label class=m>Scheduled open (optional)</label><input id=opent type=datetime-local value="${D.openAt||""}"></div><div style="flex:1;min-width:180px"><label class=m>Scheduled close (optional)</label><input id=closet type=datetime-local value="${D.closeAt||""}"></div></div></div>
 ${D.qs.map((q, i) => `<div class=card><div class="row sp"><b>Q${i + 1} · ${TN[q.t]}</b><button class=g data-x=${i}>Remove</button></div>
 <label class=m>Question</label><textarea rows=2 data-q=${i} data-f=q>${e(q.q)}</textarea>
 ${q.t === "mc" ? `<label class=m>Options (one per line)</label><textarea rows=4 data-q=${i} data-f=o>${e(q.o)}</textarea><label class=m>Correct option number</label><input type=number min=1 data-q=${i} data-f=a value="${e(q.a)}">` : ""}
 ${q.t === "tf" ? `<label class=m>Correct answer</label><select data-q=${i} data-f=a><option value=true ${q.a === "true" ? "selected" : ""}>True</option><option value=false ${q.a === "false" ? "selected" : ""}>False</option></select>` : ""}
 ${q.t === "drag" ? `<label class=m>Items in the CORRECT order (one per line; shuffled for each student)</label><textarea rows=4 data-q=${i} data-f=i>${e(q.i)}</textarea>` : ""}
+${q.t === "bank" ? `<label class=m>Potential answers (2–20, one per line)</label><textarea rows=5 data-q=${i} data-f=optsBank>${e(q.optsBank||"")}</textarea><label class=m>Blank prompts (one per line)</label><textarea rows=4 data-q=${i} data-f=rowsBank>${e(q.rowsBank||"")}</textarea><label class=m>Correct answer number for each blank (one per line)</label><textarea rows=3 data-q=${i} data-f=ansBank>${e(q.ansBank||"")}</textarea>` : ""}
 <label class=m>Marks</label><input type=number min=0 step=0.5 data-q=${i} data-f=pts value="${q.pts}"></div>`).join("")}
 ${aiCard()}<div class=card><div class=m>Add question</div><div class=row style="margin-top:8px">${Object.keys(TN).map(k => `<button class=g data-add=${k}>+ ${TN[k]}</button>`).join("")}</div></div>
 <button id=sv style="width:100%;padding:13px">Save test</button>`;
@@ -123,15 +124,15 @@ ${aiCard()}<div class=card><div class=m>Add question</div><div class=row style="
   async function save() {
     const L = s => s.split("\n").map(x => x.trim()).filter(Boolean);
     if (!D.title.trim()) return toast("Add a title."); if (!D.qs.length) return toast("Add at least one question.");
-    const qs = D.qs.map(q => { const o = { t: q.t, q: q.q.trim(), pts: q.pts }; if (q.t === "mc") { o.opts = L(q.o); o.ans = Number(q.a) - 1; } if (q.t === "tf") o.ans = q.a === "true"; if (q.t === "drag") o.items = L(q.i); return o; });
-    try { if (t) await api("PUT", "/api/tests/" + t.code, { title: D.title.trim(), qs }); else await api("POST", "/api/tests", { title: D.title.trim(), qs }); toast("Test saved."); dash(); } catch (x) { err(x) }
+    const qs = D.qs.map(q => { const o = { t: q.t, q: q.q.trim(), pts: q.pts }; if (q.t === "mc") { o.opts = L(q.o); o.ans = Number(q.a) - 1; } if (q.t === "tf") o.ans = q.a === "true"; if (q.t === "drag") o.items = L(q.i); if(q.t === "bank") { o.opts=L(q.optsBank).slice(0,20); o.rows=L(q.rowsBank); o.ans=L(q.ansBank).map(x=>Number(x)-1); } return o; });
+    try { if (t) await api("PUT", "/api/tests/" + t.code, { title: D.title.trim(), qs, limitMinutes:+$("lim").value||0, openAt:$("opent").value, closeAt:$("closet").value }); else await api("POST", "/api/tests", { title: D.title.trim(), qs, limitMinutes:+$("lim").value||0, openAt:$("opent").value, closeAt:$("closet").value }); toast("Test saved."); dash(); } catch (x) { err(x) }
   }
   async function gen() {
     if (!G.topic.trim()) return toast("Enter a topic first.");
     const btn = $("gen"); btn.disabled = true; btn.textContent = "Generating… (can take 1–2 minutes)";
     try {
       const r = await api("POST", "/api/generate", { topic: G.topic, level: G.level, counts: { mc: +G.mc, tf: +G.tf, drag: +G.drag, wr: +G.wr } });
-      r.qs.forEach(q => D.qs.push({ t: q.t, q: q.q, pts: q.pts, o: (q.opts || []).join("\n"), a: q.t === "mc" ? q.ans + 1 : q.t === "tf" ? String(q.ans) : "", i: (q.items || []).join("\n") }));
+      r.qs.forEach(q => D.qs.push({ t: q.t, q: q.q, pts: q.pts, o: (q.opts || []).join("\n"), a: q.t === "mc" ? q.ans + 1 : q.t === "tf" ? String(q.ans) : "", i: (q.items || []).join("\n"), optsBank:(q.t === "bank" ? q.opts.join("\n") : ""), rowsBank:(q.t === "bank" ? q.rows.join("\n") : ""), ansBank:(q.t === "bank" ? q.ans.map(x=>x+1).join("\n") : "") }));
       if (!D.title.trim()) D.title = G.topic.trim().split("\n")[0].slice(0, 60);
       toast(`Added ${r.qs.length} questions. Check them before saving!`);
     } catch (x) { err(x) }
@@ -147,10 +148,11 @@ function monitor(code) {
   app.innerHTML = `<div id=mh></div><div id=mt class=card><p class=m>Loading…</p></div>`;
   const draw = () => {
     const { test, subs } = data, nf = subs.reduce((a, s) => a + s.flags, 0);
-    $("mh").innerHTML = `<div class="row sp"><button class=g id=b1>← Back</button><div class=row><span class=code>${code}</span><span class="tag ${test.open ? "ok" : "bad"}">${test.open ? "OPEN" : "CLOSED"}</span><button class="${test.open ? "r" : "k"}" id=tg>${test.open ? "Close test" : "Open test"}</button><button class=g id=csv>Gradebook CSV</button></div></div><h2>${e(test.title)}</h2><p class=m>${subs.length} student(s) · ${subs.filter(s => s.status === "done").length} submitted · ${nf} total flags · updates live</p>`;
+    $("mh").innerHTML = `<div class="row sp"><button class=g id=b1>← Back</button><div class=row><span class=code>${code}</span><span class="tag ${test.open ? "ok" : "bad"}">${test.open ? "OPEN" : "CLOSED"}</span><button class="${test.open ? "r" : "k"}" id=tg>${test.open ? "Close test" : "Open test"}</button><button class=g id=csv>Gradebook CSV</button><button class=g id=release>${test.released ? "Unrelease results" : "Release results"}</button></div></div><h2>${e(test.title)}</h2><p class=m>${subs.length} student(s) · ${subs.filter(s => s.status === "done").length} submitted · ${nf} total flags · updates live</p>`;
     $("b1").onclick = dash;
     $("tg").onclick = async () => { try { if (test.open && !await ask("Close the test? Students still working will be submitted automatically.")) return; await api("POST", `/api/tests/${code}/toggle`); tick(); } catch (x) { err(x) } };
     $("csv").onclick = () => download(`${test.title}-grades.csv`, "Name,Status,Score,Total,Flags\n" + subs.map(s => `"${s.name.replace(/"/g, '""')}",${s.status === "done" ? "submitted" : "in progress"},${s.score},${s.total},${s.flags}`).join("\n"), "text/csv");
+    $("release").onclick = async () => { try { await api("POST", `/api/tests/${code}/release`, {released:!test.released}); toast(test.released ? "Results hidden from students." : "Results released to students."); tick(); } catch(x){err(x)} };
     $("mt").innerHTML = subs.length ? `<div class=tw><table><tr><th>Student</th><th>Status</th><th>Progress</th><th>Score</th><th>Flags</th><th>Last seen</th></tr>${subs.map(s => { const p = Math.round(s.answered / test.qs.length * 100);
       return `<tr class=cl data-s="${s.id}"><td><b>${e(s.name)}</b></td><td><span class="tag ${s.status === "done" ? "ok" : "w"}">${s.status === "done" ? (s.reviewed ? "MARKED" : "SUBMITTED") : "IN PROGRESS"}</span></td><td><div class=bar><i style="width:${p}%"></i></div><span class=m>${s.answered}/${test.qs.length}</span></td><td>${s.score} / ${s.total}</td><td>${s.flags ? `<span class="tag bad">⚠ ${s.flags}</span>` : `<span class=m>0</span>`}</td><td class=m>${s.updated ? fmt(s.updated) : "-"}</td></tr>`; }).join("")}</table></div><p class=m>Click a student to review and mark. Written answers count 0 until marked.</p>` : `<p class=m>Waiting for students. Share the code <b>${code}</b> and open the test.</p>`;
     $("mt").onclick = ev => { const r = ev.target.closest("tr[data-s]"); if (r) review(test, r.dataset.s, code); };
@@ -183,7 +185,7 @@ ${test.qs.map((q, i) => { const a = (s.answers || {})["q" + i], m = mark(test, s
   $("ex").onclick = () => {
     const r = read(); Object.assign(s, r);
     const body = test.qs.map((q, i) => `<div style="border:1px solid #ccc;border-radius:8px;padding:12px;margin:12px 0"><b>Q${i + 1}</b> <span style="float:right">${mark(test, s, i)} / ${q.pts}</span><p>${e(q.q)}</p><p><b>Your answer:</b> ${e(aText(q, (s.answers || {})["q" + i]))}</p><p style="color:#555"><b>Expected:</b> ${e(cText(q))}</p>${(s.fb || {})["q" + i] ? `<p style="background:#fff7d6;padding:8px;border-radius:6px"><b>Teacher feedback:</b> ${e(s.fb["q" + i])}</p>` : ""}</div>`).join("");
-    download((test.title + "-" + s.name).replace(/[^\w-]+/g, "_") + ".html", `<!doctype html><meta charset=utf-8><title>${e(test.title)} - ${e(s.name)}</title><body style="font:15px/1.5 system-ui,sans-serif;max-width:760px;margin:24px auto;padding:0 16px"><h1>${e(test.title)}</h1><h3>${e(s.name)} — ${score(test, s)} / ${total(test)}</h3>${body}`, "text/html");
+    const w=window.open("","_blank"); if(!w) return toast("Allow pop-ups to export the PDF."); w.document.write(`<!doctype html><html><head><meta charset="utf-8"><title>${e(test.title)} - ${e(s.name)}</title><style>body{font:15px/1.5 Arial,sans-serif;max-width:760px;margin:28px auto;padding:0 20px;color:#161a22}h1{margin-bottom:4px}.meta{color:#555}.q{border:1px solid #ccc;border-radius:8px;padding:12px;margin:12px 0;break-inside:avoid}.fb{background:#fff7d6;padding:8px;border-radius:6px}@media print{button{display:none}}</style></head><body><h1>${e(test.title)}</h1><h3>${e(s.name)} — ${score(test,s)} / ${total(test)}</h3><p class="meta">Test code: ${e(code)} · Exported ${new Date().toLocaleDateString()}</p>${body}<script>window.onload=()=>setTimeout(()=>window.print(),300)<\/script></body></html>`); w.document.close();
   };
 }
 
@@ -205,7 +207,7 @@ function intro(token, t, answers, who) {
 }
 function run(token, t, answers) {
   clean();
-  const S = { answers: answers || {} }; let live = true, last = 0, timer, busy = false;
+  const S = { answers: answers || {} }; let live = true, last = 0, timer, busy = false; const deadline = t.limitMinutes ? Date.now()+Math.max(0,(t.limitMinutes*60000)) : 0;
   const answered = () => t.qs.filter((q, i) => { const a = S.answers["q" + i]; return q.t === "wr" ? !!(a && a.trim()) : a !== undefined && a !== null; }).length;
   const ord = i => S.answers["q" + i] || t.qs[i].items.map(x => x.i);
   const dragH = i => ord(i).map((k, p) => `<div class=dr draggable=true data-qi=${i} data-p=${p}><span>${e(t.qs[i].items.find(x => x.i === k).x)}</span><button class=g data-mv=-1 data-qi=${i} data-p=${p}>▲</button><button class=g data-mv=1 data-qi=${i} data-p=${p}>▼</button></div>`).join("");
@@ -216,29 +218,29 @@ function run(token, t, answers) {
   };
   const save = () => { clearTimeout(timer); timer = setTimeout(push, 600); };
   const flag = k => { if (!live) return; const n = Date.now(); if (n - last < 1500) return; last = n; api("POST", "/api/flag", { token, k }).catch(() => {}); const w = $("warn"); w.style.display = "block"; setTimeout(() => w.style.display = "none", 6000); };
-  app.innerHTML = `<div class="card row sp ns" style="position:sticky;top:6px;z-index:5"><b>${e(t.title)}</b><span class=m id=pg></span></div><div class=ns id=qs>${t.qs.map((q, i) => { const a = S.answers["q" + i];
+  app.innerHTML = `<div class="card row sp ns" style="position:sticky;top:6px;z-index:5"><b>${e(t.title)}</b><span class=m id=pg></span><b id=clock class=tag></b></div><div class=ns id=qs>${t.qs.map((q, i) => { const a = S.answers["q" + i];
     const b = q.t === "mc" ? q.opts.map((o, j) => `<label class=o><input type=radio name=q${i} data-i=${i} data-v=${j} ${a === j ? "checked" : ""}>${e(o)}</label>`).join("") :
       q.t === "tf" ? [true, false].map(v => `<label class=o><input type=radio name=q${i} data-i=${i} data-v=${v} ${a === v ? "checked" : ""}>${v ? "True" : "False"}</label>`).join("") :
-      q.t === "drag" ? `<p class=m>Drag items (or use the arrows) into the correct order.</p><div id=d${i}>${dragH(i)}</div>` :
+      q.t === "drag" ? `<p class=m>Drag items (or use the arrows) into the correct order.</p><div id=d${i}>${dragH(i)}</div>` : q.t === "title" ? `<textarea class=sel data-i=${i} data-w=1 rows=2 placeholder="Write here…">${e(a||"")}</textarea>` : q.t === "bank" ? `<div class=bankopts><b>Potential answers</b><div class=bankgrid>${q.opts.map((x,j)=>`<span>${j+1}. ${e(x)}</span>`).join("")}</div></div>${q.rows.map((row,j)=>`<label>${e(row)}<select data-bank=${i} data-row=${j}><option value="">Choose an answer</option>${q.opts.map((x,k)=>`<option value=${k} ${Array.isArray(a)&&a[j]===k?"selected":""}>${e(x)}</option>`).join("")}</select></label>`).join("")}` :
       `<textarea class=sel data-i=${i} data-w=1 rows=7 placeholder="Type your answer…">${e(a || "")}</textarea>`;
     return `<section class=card><div class=qh><b>Q${i + 1}</b><span class=m>${q.pts} pt${q.pts == 1 ? "" : "s"}</span></div><p class=qt>${e(q.q)}</p>${b}</section>`; }).join("")}</div><button id=sb class=k style="width:100%;padding:13px">Submit test</button>`;
-  const bar = () => { $("pg").textContent = answered() + " / " + t.qs.length + " answered"; }; bar();
+  const bar = () => { $("pg").textContent = answered() + " / " + t.qs.length + " answered"; }; bar(); const tickClock=()=>{if(!deadline)return;const left=Math.max(0,deadline-Date.now());$("clock").textContent=`${Math.floor(left/60000)}:${String(Math.floor(left/1000)%60).padStart(2,"0")}`;if(left===0 && live){busy=true;api("POST","/api/submit",{token,answers:S.answers}).then(()=>finish(true)).catch(()=>finish(true));}}; tickClock(); const clockInt=deadline?setInterval(tickClock,1000):null; if(!deadline) $("clock").style.display="none";
   const setA = (i, v) => { S.answers["q" + i] = v; bar(); save(); };
   const mv = (i, f, to) => { const a = [...ord(i)]; if (to < 0 || to >= a.length) return; const [x] = a.splice(f, 1); a.splice(to, 0, x); setA(i, a); $("d" + i).innerHTML = dragH(i); };
   const q$ = $("qs");
-  q$.onchange = ev => { const d = ev.target.dataset; if (d.v !== undefined) setA(+d.i, t.qs[d.i].t === "tf" ? d.v === "true" : Number(d.v)); };
-  q$.oninput = ev => { const d = ev.target.dataset; if (d.w) setA(+d.i, ev.target.value); };
+  q$.onchange = ev => { const d = ev.target.dataset; if (d.v !== undefined) setA(+d.i, t.qs[d.i].t === "tf" ? d.v === "true" : Number(d.v)); if(d.bank!==undefined){const i=+d.bank, a=Array.isArray(S.answers["q"+i])?[...S.answers["q"+i]]:t.qs[i].rows.map(()=>null); a[+d.row]=d.value===""?null:Number(d.value); setA(i,a);} };
+  q$.oninput = ev => { const d = ev.target.dataset; if (d.w) setA(+d.i, ev.target.value); lastInput=Date.now(); }; q$.onchange = ((old)=>ev=>{old(ev);lastInput=Date.now();})(q$.onchange);
   q$.onclick = ev => { const b = ev.target.closest("button[data-mv]"); if (b) mv(+b.dataset.qi, +b.dataset.p, +b.dataset.p + Number(b.dataset.mv)); };
   let from = null;
   q$.ondragstart = ev => { const r = ev.target.closest(".dr"); if (r) { from = r.dataset; try { ev.dataTransfer.setData("text/plain", "x") } catch (_) {} } };
   q$.ondragover = ev => { if (ev.target.closest(".dr")) ev.preventDefault(); };
   q$.ondrop = ev => { const r = ev.target.closest(".dr"); if (r && from && from.qi === r.dataset.qi) { ev.preventDefault(); mv(+from.qi, +from.p, +r.dataset.p); } from = null; };
   const blockH = ev => { if (live) ev.preventDefault(); };
-  const evs = ["copy", "cut", "paste", "contextmenu"]; evs.forEach(n => document.addEventListener(n, blockH));
+  const evs = ["copy", "cut", "paste", "contextmenu"]; evs.forEach(n => document.addEventListener(n, blockH)); document.addEventListener("paste", pasteFlag, true); let lastInput=Date.now(); const pauseInt=setInterval(()=>{if(live && Date.now()-lastInput>120000){flag("Long pause (2+ minutes)");lastInput=Date.now();}},30000); const pasteFlag=()=>flag("Pasted text"); window.addEventListener("resize",resizeFlag); const resizeFlag=()=>flag("Window resized");
   const vis = () => { if (document.hidden) flag("Left the test tab"); }, blur = () => { if (!document.hidden) flag("Window lost focus"); }, fs = () => { if (!document.fullscreenElement) flag("Exited full screen"); };
   document.addEventListener("visibilitychange", vis); window.addEventListener("blur", blur); document.addEventListener("fullscreenchange", fs);
   const hb = setInterval(push, 5000);
-  const stop = () => { live = false; clearInterval(hb); clearTimeout(timer); document.removeEventListener("visibilitychange", vis); window.removeEventListener("blur", blur); document.removeEventListener("fullscreenchange", fs); evs.forEach(n => document.removeEventListener(n, blockH)); try { document.fullscreenElement && document.exitFullscreen(); } catch (_) {} $("warn").style.display = "none"; };
+  const stop = () => { live = false; if(clockInt) clearInterval(clockInt); clearInterval(hb); clearTimeout(timer); document.removeEventListener("visibilitychange", vis); window.removeEventListener("blur", blur); document.removeEventListener("fullscreenchange", fs); document.removeEventListener("paste",pasteFlag,true); window.removeEventListener("resize",resizeFlag); clearInterval(pauseInt); evs.forEach(n => document.removeEventListener(n, blockH)); try { document.fullscreenElement && document.exitFullscreen(); } catch (_) {} $("warn").style.display = "none"; };
   const finish = auto => { stop(); saveSess(null); app.innerHTML = `<div class=card style="text-align:center;margin-top:40px"><h2>✅ Test submitted</h2><p class=m>${auto ? "Your teacher closed the test, so it was submitted automatically." : "Your answers were sent to your teacher."}<br>You can close this page.</p><button class=g id=hm>Back to start</button></div>`; $("hm").onclick = home; };
   $("sb").onclick = async () => {
     if (busy) return; const n = t.qs.length - answered();

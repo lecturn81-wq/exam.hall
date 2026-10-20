@@ -66,28 +66,30 @@ function cleanQs(qs) {
   return qs.map((q, i) => {
     const n = "Q" + (i + 1) + ": ";
     const o = { t: q.t, q: String(q.q || "").trim().slice(0, 3000), pts: Number(q.pts) };
-    if (!["mc", "tf", "drag", "wr"].includes(o.t)) throw n + "invalid type";
-    if (!o.q) throw n + "question text is empty";
+    if (!["mc", "tf", "drag", "wr", "title", "bank"].includes(o.t)) throw n + "invalid type";
+    if (o.t !== "title" && !o.q) throw n + "question text is empty";
     if (!(o.pts >= 0 && o.pts <= 1000)) throw n + "invalid marks";
     if (o.t === "mc") { o.opts = L(q.opts); o.ans = Number(q.ans); if (o.opts.length < 2 || o.opts.length > 12) throw n + "needs 2-12 options"; if (!Number.isInteger(o.ans) || o.ans < 0 || o.ans >= o.opts.length) throw n + "correct option out of range"; }
     if (o.t === "tf") o.ans = q.ans === true;
+    if (o.t === "bank") { o.opts = L(q.opts).slice(0,20); o.rows = L(q.rows); if (o.opts.length < 2 || !o.rows.length) throw n + "question bank needs 2-20 choices and at least one blank"; o.ans = Array.isArray(q.ans) ? q.ans.map(x => Math.max(0, Math.min(o.opts.length-1, Number(x)||0))) : []; if (o.ans.length !== o.rows.length) o.ans = o.rows.map(() => 0); }
     if (o.t === "drag") { o.items = L(q.items); if (o.items.length < 2 || o.items.length > 12) throw n + "needs 2-12 items"; }
     return o;
   });
 }
 function auto(q, a) {
-  if (q.t === "wr") return null; if (a === undefined || a === null) return 0;
+  if (q.t === "wr" || q.t === "title") return null;
+  if (q.t === "bank") return Array.isArray(a) && a.length === q.rows.length && a.every((v,i) => v === q.ans[i]) ? q.pts : 0; if (a === undefined || a === null) return 0;
   if (q.t === "drag") return Array.isArray(a) && a.length === q.items.length && a.every((v, k) => v === k) ? q.pts : 0;
   return a === q.ans ? q.pts : 0;
 }
 function mark(t, s, i) { const m = (s.marks || {})["q" + i]; return m !== undefined && m !== null ? Number(m) : (auto(t.qs[i], (s.answers || {})["q" + i]) || 0); }
 const total = t => t.qs.reduce((a, q) => a + q.pts, 0);
 function answered(t, s) {
-  return t.qs.filter((q, i) => { const a = (s.answers || {})["q" + i]; return q.t === "wr" ? !!(a && a.trim()) : a !== undefined && a !== null; }).length;
+  return t.qs.filter((q, i) => { const a = (s.answers || {})["q" + i]; return (q.t === "wr" || q.t === "title") ? !!(a && a.trim()) : a !== undefined && a !== null; }).length;
 }
 const summary = (t, s) => ({ id: s.id, name: s.name, status: s.status, reviewed: !!s.reviewed, answered: answered(t, s), score: t.qs.reduce((a, _, i) => a + mark(t, s, i), 0), total: total(t), flags: (s.flags || []).length, updated: s.updated, submitted: s.submitted });
 function pub(t, s) {
-  return { code: t.code, title: t.title, open: t.open, qs: t.qs.map((q, i) => { const o = { t: q.t, q: q.q, pts: q.pts }; if (q.t === "mc") o.opts = q.opts; if (q.t === "drag") o.items = s.shuf["q" + i].map(k => ({ i: k, x: q.items[k] })); return o; }) };
+  return { code: t.code, title: t.title, open: t.open, limitMinutes: t.limitMinutes||0, qs: t.qs.map((q, i) => { const o = { t: q.t, q: q.q, pts: q.pts }; if (q.t === "mc" || q.t === "bank") { o.opts = q.opts; if(q.t === "bank") o.rows = q.rows; } if (q.t === "drag") o.items = s.shuf["q" + i].map(k => ({ i: k, x: q.items[k] })); return o; }) };
 }
 function cleanAnswers(t, a) {
   const out = {}; if (!a || typeof a !== "object") return out;
@@ -95,7 +97,8 @@ function cleanAnswers(t, a) {
     const v = a["q" + i]; if (v === undefined || v === null) return;
     if (q.t === "mc" && Number.isInteger(v) && v >= 0 && v < q.opts.length) out["q" + i] = v;
     else if (q.t === "tf" && typeof v === "boolean") out["q" + i] = v;
-    else if (q.t === "wr" && typeof v === "string") out["q" + i] = v.slice(0, 20000);
+    else if ((q.t === "wr" || q.t === "title") && typeof v === "string") out["q" + i] = v.slice(0, 20000);
+    else if (q.t === "bank" && Array.isArray(v) && v.length === q.rows.length && v.every(x => Number.isInteger(x) && x >= 0 && x < q.opts.length)) out["q" + i] = v;
     else if (q.t === "drag" && Array.isArray(v) && v.length === q.items.length && [...v].sort((x, y) => x - y).every((x, k) => x === k)) out["q" + i] = v;
   });
   return out;
@@ -146,16 +149,16 @@ async function generate(b) {
   const topic = String(b.topic || "").trim().slice(0, 4000), level = String(b.level || "").trim().slice(0, 100) || "general";
   if (!topic) throw { code: 400, msg: "Enter a topic." };
   const c = {}; let n = 0;
-  for (const k of ["mc", "tf", "drag", "wr"]) { c[k] = Math.max(0, Math.min(50, Math.floor(Number(b.counts && b.counts[k]) || 0))); n += c[k]; }
+  for (const k of ["mc", "tf", "drag", "wr", "title", "bank"]) { c[k] = Math.max(0, Math.min(50, Math.floor(Number(b.counts && b.counts[k]) || 0))); n += c[k]; }
   if (!n || n > 60) throw { code: 400, msg: "Ask for between 1 and 60 questions in total (up to 50 of each type)." };
   const prompt = `You write exam questions for teachers. The teacher's instructions about the subject and style are between the markers. Follow them for CONTENT only; the output format rules below always take priority.
 ---BEGIN TEACHER INSTRUCTIONS---
 ${topic}
 ---END TEACHER INSTRUCTIONS---
 Level: ${level}.
-Create exactly: ${c.mc} multiple choice (t:"mc"), ${c.tf} true/false (t:"tf"), ${c.drag} drag-to-order (t:"drag"), ${c.wr} written-answer (t:"wr") questions.
-Reply with ONLY JSON, no markdown: {"questions":[{"t":"mc","q":"...","pts":1,"opts":["A","B","C","D"],"ans":0},{"t":"tf","q":"...","pts":1,"ans":true},{"t":"drag","q":"Put these in order...","pts":3,"items":["first","second","third"]},{"t":"wr","q":"...","pts":4}]}
-Rules: mc has exactly 4 options and "ans" is the 0-based index of the single correct option; tf "ans" is true or false; drag has 3-6 items listed in the CORRECT order and the order must be objectively determinable (chronology, steps of a process, size...); wr has no answer field. Be factually accurate and unambiguous.`;
+Create exactly: ${c.mc} multiple choice (t:"mc"), ${c.tf} true/false (t:"tf"), ${c.drag} drag-to-order (t:"drag"), ${c.wr} written-answer (t:"wr"), ${c.title} title/text (t:"title"), ${c.bank} question-bank fill-in (t:"bank") questions.
+Reply with ONLY JSON, no markdown: {"questions":[{"t":"title","q":"Section heading","pts":0},{"t":"bank","q":"Complete the sentences","pts":3,"opts":["choice A","choice B"],"rows":["First blank","Second blank"],"ans":[0,1]},{"t":"mc","q":"...","pts":1,"opts":["A","B","C","D"],"ans":0},{"t":"tf","q":"...","pts":1,"ans":true},{"t":"drag","q":"Put these in order...","pts":3,"items":["first","second","third"]},{"t":"wr","q":"...","pts":4}]}
+Rules: mc has exactly 4 options and "ans" is the 0-based index of the single correct option; tf "ans" is true or false; drag has 3-6 items listed in the CORRECT order and the order must be objectively determinable (chronology, steps of a process, size...); wr has no answer field; title is display text with pts 0; bank has 2-20 opts, rows and a 0-based ans index per row. Be factually accurate and unambiguous.`;
   aiHits.push(now);
   let text;
   try {
@@ -216,14 +219,14 @@ async function api(req, res, url) {
   /* ----- student ----- */
   if (p === "/api/join" && m === "POST") {
     const code = String(body.code || "").trim().toUpperCase(), name = String(body.name || "").trim().slice(0, 60);
-    const t = db.tests[code]; if (!name || !code) return fail(res, 400, "Enter your name and the test code.");
+    const t = db.tests[code]; if(t && t.openAt && Date.now() >= t.openAt) t.open = true; if(t && t.closeAt && Date.now() >= t.closeAt) t.open = false; if (!name || !code) return fail(res, 400, "Enter your name and the test code.");
     if (!t) return fail(res, 404, "No test found with that code.");
     let s = subsOf(code).find(x => x.name.toLowerCase() === name.toLowerCase());
     if (s) {
       if (s.status === "done") return fail(res, 409, "This name has already submitted this test.");
       s.token = crypto.randomBytes(24).toString("hex"); s.flags.push({ k: FLAGS[3], t: Date.now() });
     } else {
-      if (!t.open) return fail(res, 403, "This test is not open yet. Ask your teacher.");
+      if (t.openAt && Date.now() < t.openAt) return fail(res, 403, "This test is scheduled to open later."); if (t.closeAt && Date.now() >= t.closeAt) t.open = false; if (!t.open) return fail(res, 403, "This test is not open yet. Ask your teacher.");
       const id = crypto.randomBytes(8).toString("hex"), shuf = {};
       t.qs.forEach((q, i) => { if (q.t === "drag") shuf["q" + i] = shuffle(q.items.length); });
       s = db.subs[id] = { id, code, name, token: crypto.randomBytes(24).toString("hex"), answers: {}, flags: [], status: "in", started: Date.now(), updated: Date.now(), shuf };
@@ -232,13 +235,13 @@ async function api(req, res, url) {
   }
   if (p === "/api/state" && m === "POST") {
     const s = byToken(body.token); if (!s) return fail(res, 401, "Session expired.");
-    const t = db.tests[s.code]; if (!t) return fail(res, 404, "Test no longer exists.");
+    const t = db.tests[s.code]; if (!t) return fail(res, 404, "Test no longer exists."); if(t.closeAt && Date.now() >= t.closeAt) t.open=false; if(t.openAt && Date.now() >= t.openAt && (!t.closeAt || Date.now()<t.closeAt)) t.open=true;
     if (s.status === "in") { s.flags.push({ k: FLAGS[3], t: Date.now() }); persist(); }
     return send(res, 200, { status: s.status, test: pub(t, s), answers: s.answers });
   }
   if (p === "/api/save" && m === "POST") {
     const s = byToken(body.token); if (!s) return fail(res, 401, "Session expired.");
-    const t = db.tests[s.code]; if (!t) return fail(res, 404, "Test no longer exists.");
+    const t = db.tests[s.code]; if (!t) return fail(res, 404, "Test no longer exists."); if(t.closeAt && Date.now() >= t.closeAt) t.open=false; if(t.openAt && Date.now() >= t.openAt && (!t.closeAt || Date.now()<t.closeAt)) t.open=true;
     if (s.status === "done") return send(res, 200, { status: "done" });
     if (!t.open) { s.answers = { ...s.answers, ...cleanAnswers(t, body.answers) }; finish(s); persist(); return send(res, 200, { status: "done" }); }
     s.answers = cleanAnswers(t, body.answers); s.updated = Date.now(); persist();
@@ -269,7 +272,7 @@ async function api(req, res, url) {
   if (p === "/api/tests" && m === "POST") {
     const title = String(body.title || "").trim().slice(0, 100); if (!title) return fail(res, 400, "Add a title.");
     let qs; try { qs = cleanQs(body.qs); } catch (x) { return fail(res, 400, String(x)); }
-    const code = newCode(); db.tests[code] = { code, title, qs, open: false, created: Date.now() }; persist(); return send(res, 200, { code });
+    const code = newCode(); db.tests[code] = { code, title, qs, open: false, created: Date.now(), limitMinutes: Math.max(0, Math.min(600, Number(body.limitMinutes)||0)), openAt: body.openAt ? Date.parse(body.openAt)||0 : 0, closeAt: body.closeAt ? Date.parse(body.closeAt)||0 : 0, released: false }; persist(); return send(res, 200, { code });
   }
   if ((r = /^\/api\/tests\/([A-Z0-9]{6})(\/toggle)?$/.exec(p))) {
     const t = db.tests[r[1]]; if (!t) return fail(res, 404, "Test not found.");
@@ -279,10 +282,11 @@ async function api(req, res, url) {
       const title = String(body.title || "").trim().slice(0, 100); if (!title) return fail(res, 400, "Add a title.");
       let qs; try { qs = cleanQs(body.qs); } catch (x) { return fail(res, 400, String(x)); }
       if (subsOf(t.code).length && JSON.stringify(qs.map(q => q.t)) !== JSON.stringify(t.qs.map(q => q.t))) return fail(res, 409, "Students already joined: you can edit wording and answers, but not add, remove or change question types.");
-      t.title = title; t.qs = qs; persist(); return send(res, 200, { ok: true });
+      t.title = title; t.qs = qs; t.limitMinutes = Math.max(0, Math.min(600, Number(body.limitMinutes)||0)); t.openAt = body.openAt ? Date.parse(body.openAt)||0 : 0; t.closeAt = body.closeAt ? Date.parse(body.closeAt)||0 : 0; persist(); return send(res, 200, { ok: true });
     }
     if (m === "DELETE" && !r[2]) { subsOf(t.code).forEach(s => delete db.subs[s.id]); delete db.tests[t.code]; persist(); return send(res, 200, { ok: true }); }
   }
+  if ((r = /^\/api\/tests\/([A-Z0-9]{6})\/release$/.exec(p)) && m === "POST") { const t=db.tests[r[1]]; if(!t)return fail(res,404,"Test not found."); t.released=body.released!==false; persist(); return send(res,200,{released:t.released}); }
   if ((r = /^\/api\/subs\/([a-f0-9]{16})(\/marks)?$/.exec(p))) {
     const s = db.subs[r[1]]; if (!s) return fail(res, 404, "Submission not found.");
     if (m === "GET" && !r[2]) { const { token, shuf, ...rest } = s; return send(res, 200, rest); }
