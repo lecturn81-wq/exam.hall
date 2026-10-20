@@ -24,3 +24,12 @@ tr.cl{cursor:pointer}tr.cl:hover{background:var(--bg)}
 #warn{position:fixed;top:0;left:0;right:0;background:var(--bad);color:#fff;text-align:center;padding:8px;font-weight:700;display:none;z-index:8}
 .ok{color:var(--ok)}.bad{color:var(--bad)}
 .ov{position:fixed;inset:0;background:rgba(0,0,0,.55);display:flex;align-items:center;justify-content:center;z-index:20;padding:16px}
+/* v3 additions */
+.bt{table-layout:fixed;margin:8px 0 6px}.bt td{border:1px solid var(--b);white-space:normal;text-align:center;padding:8px 10px;font-weight:600;word-break:break-word}.bt td.em{background:transparent}
+.bs{padding:6px 0;border-bottom:1px solid var(--b);line-height:2.3}.bs select{width:auto;max-width:100%;display:inline-block;margin:0 6px;padding:5px 8px}
+.tm{font-weight:700;font-variant-numeric:tabular-nums;padding:2px 9px;border-radius:99px;font-size:14px}
+.tag.tm{font-size:14px}
+.ti .qt{font-size:19px;font-weight:700;margin:2px 0}
+.fb{background:#fff7d6;color:#161a22;padding:8px;border-radius:6px}
+.fl{max-height:220px;overflow:auto;margin-top:6px}
+button:disabled{opacity:.45;cursor:not-allowed}
